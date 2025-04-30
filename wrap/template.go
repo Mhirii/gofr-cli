@@ -11,13 +11,13 @@ package {{ .Package }}
 
 import (
 	"context"
-
+	"time"
+	
 	"gofr.dev/pkg/gofr"
 	"gofr.dev/pkg/gofr/container"
+	gofrgRPC "gofr.dev/pkg/gofr/grpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
+	
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -28,73 +28,253 @@ func New{{ .Service }}GoFrServer() *{{ .Service }}GoFrServer {
 	}
 }
 
- // {{ .Service }}ServerWithGofr is the interface for the server implementation
-    type {{ .Service }}ServerWithGofr interface {
-        {{- range .Methods }}
-        {{- if or .StreamsRequest .StreamsResponse }}
-        {{ .Name }}(*gofr.Context, {{ $.Service }}_{{ .Name }}Server) error
-        {{- else }}
-        {{ .Name }}(*gofr.Context) (any, error)
-        {{- end }}
-        {{- end }}
-    }
+// {{ .Service }}ServerWithGofr is the interface for the server implementation
+type {{ .Service }}ServerWithGofr interface {
+{{- range .Methods }}
+{{- if or .StreamsRequest .StreamsResponse }}
+	{{ .Name }}(*gofr.Context, {{ $.Service }}_{{ .Name }}Server) error
+{{- else }}
+	{{ .Name }}(*gofr.Context, *{{ .Request }}) (*{{ .Response }}, error)
+{{- end }}
+{{- end }}
+}
 
-    {{ range .Methods }}
-    {{- if .StreamsResponse }}
-    {{- if not .StreamsRequest }}
-    // Server-side streaming for {{ .Name }}
-    func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(req *{{ .Request }}, stream {{ $.Service }}_{{ .Name }}Server) error {
-        ctx := stream.Context()
-        gctx := h.getGofrContext(ctx, &{{ .Request }}Wrapper{ctx: ctx, {{ .Request }}: req})
-        return h.server.{{ .Name }}(gctx, stream)
-    }
-    {{- else }}
-    // Bidirectional streaming for {{ .Name }}
-    func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(stream {{ $.Service }}_{{ .Name }}Server) error {
-        ctx := stream.Context()
-        gctx := h.getGofrContext(ctx, nil)
-        wrappedStream := &{{ .Name | lowerFirst }}Wrapper{stream, gctx}
-        return h.server.{{ .Name }}(gctx, wrappedStream)
-    }
-    {{- end }}
-    {{- else if .StreamsRequest }}
-    // Client-side streaming for {{ .Name }}
-    func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(stream {{ $.Service }}_{{ .Name }}Server) error {
-        ctx := stream.Context()
-        gctx := h.getGofrContext(ctx, nil)
-        wrappedStream := &{{ .Name | lowerFirst }}Wrapper{stream, gctx}
-        return h.server.{{ .Name }}(gctx, wrappedStream)
-    }
-    {{- end }}
-    {{- end }}
+// {{ .Service }}ServerWrapper wraps the server and handles request and response logic
+type {{ .Service }}ServerWrapper struct {
+	{{ .Service }}Server
+	*healthServer
+	Container *container.Container
+	server    {{ .Service }}ServerWithGofr
+}
 
-    // Stream wrappers for context propagation
-    {{ range .Methods }}
-    {{- if or .StreamsRequest .StreamsResponse }}
-    type {{ .Name | lowerFirst }}Wrapper struct {
-        {{ $.Service }}_{{ .Name }}Server
-        ctx *gofr.Context
-    }
+// Base instrumented stream
+type instrumentedStream struct {
+	grpc.ServerStream
+	ctx    *gofr.Context
+	method string
+}
 
-    func (w *{{ .Name | lowerFirst }}Wrapper) Context() context.Context {
-        return w.ctx
-    }
-    {{- end }}
-    {{- end }}
+func (s *instrumentedStream) Context() context.Context {
+	return s.ctx
+}
 
-// mustEmbedUnimplemented{{ .Service }}Server ensures that the server implements all required methods
+func (s *instrumentedStream) SendMsg(m interface{}) error {
+	start := time.Now()
+	span := s.ctx.Trace(s.method + "/SendMsg")
+	defer span.End()
+
+	err := s.ServerStream.SendMsg(m)
+
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(s.ctx, s.ctx.Logger, s.ctx.Metrics(), start, err,
+		s.method+"/SendMsg", "app_gRPC-Stream_stats")
+
+	return err
+}
+
+func (s *instrumentedStream) RecvMsg(m interface{}) error {
+	start := time.Now()
+	span := s.ctx.Trace(s.method + "/RecvMsg")
+	defer span.End()
+
+	err := s.ServerStream.RecvMsg(m)
+
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(s.ctx, s.ctx.Logger, s.ctx.Metrics(), start, err,
+		s.method+"/RecvMsg", "app_gRPC-Stream_stats")
+
+	return err
+}
+{{ range .Methods }}
+{{- if .StreamsRequest }}
+// Client-side streaming specific wrapper
+type clientStreamWrapper{{ .Name }} struct {
+	*instrumentedStream
+}
+
+func (w *clientStreamWrapper{{ .Name }}) SendAndClose(m *{{ .Response }}) error {
+	start := time.Now()
+	span := w.ctx.Trace(w.method + "/SendAndClose")
+	defer span.End()
+	
+	err := w.ServerStream.SendMsg(m)
+	
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	w.method+"/SendAndClose", "app_gRPC-Stream_stats")
+	
+	return err
+}
+
+func (w *clientStreamWrapper{{ .Name }}) Recv() (*{{ .Request }}, error) {
+	start := time.Now()
+	span := w.ctx.Trace(w.method + "/Recv")
+	defer span.End()
+	
+	var req {{ .Request }}
+	err := w.ServerStream.RecvMsg(&req)
+	
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	w.method+"/Recv", "app_gRPC-Stream_stats")
+	
+	return &req, err
+}
+{{- end }}
+
+{{- if .StreamsResponse }}
+{{- if not .StreamsRequest }}
+// Server-side streaming specific wrapper
+type serverStreamWrapper{{ .Name }} struct {
+	*instrumentedStream
+}
+
+func (w *serverStreamWrapper{{ .Name }}) Send(m *{{ .Response }}) error {
+	start := time.Now()
+	span := w.ctx.Trace(w.method + "/Send")
+	defer span.End()
+	
+	err := w.ServerStream.SendMsg(m)
+	
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	w.method+"/Send", "app_gRPC-Stream_stats")
+	
+	return err
+}
+{{- else }}
+// Bidirectional streaming wrapper
+type bidiStreamWrapper{{ .Name }} struct {
+	*instrumentedStream
+}
+
+func (w *bidiStreamWrapper{{ .Name }}) Send(m *{{ .Response }}) error {
+	start := time.Now()
+	span := w.ctx.Trace(w.method + "/Send")
+	defer span.End()
+	
+	err := w.ServerStream.SendMsg(m)
+	
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	w.method+"/Send", "app_gRPC-Stream_stats")
+	
+	return err
+}
+
+func (w *bidiStreamWrapper{{ .Name }}) Recv() (*{{ .Request }}, error) {
+	start := time.Now()
+	span := w.ctx.Trace(w.method + "/Recv")
+	defer span.End()
+	
+	var req {{ .Request }}
+	err := w.ServerStream.RecvMsg(&req)
+	
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+	w.method+"/Recv", "app_gRPC-Stream_stats")
+	
+	return &req, err
+}
+
+func (w *bidiStreamWrapper{{ .Name }}) CloseSend() error {
+	start := time.Now()
+	span := w.ctx.Trace(w.method + "/CloseSend")
+	defer span.End()
+
+	err := w.ServerStream.(grpc.ClientStream).CloseSend()
+
+	logger := gofrgRPC.NewgRPCLogger()
+	logger.DocumentRPCLog(w.ctx, w.ctx.Logger, w.ctx.Metrics(), start, err,
+		w.method+"/CloseSend", "app_gRPC-Stream_stats")
+
+	return err
+}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{ range .Methods }}
+{{- if .StreamsResponse }}
+{{- if not .StreamsRequest }}
+// Server-side streaming handler for {{ .Name }}
+func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(req *{{ .Request }}, stream {{ $.Service }}_{{ .Name }}Server) error {
+	ctx := stream.Context()
+	gctx := h.getGofrContext(ctx, &{{ .Request }}Wrapper{ctx: ctx, {{ .Request }}: req})
+	
+	is := &instrumentedStream{
+		ServerStream: stream,
+		ctx:        gctx,
+		method:     "/{{ $.Service }}/{{ .Name }}",
+	}
+	
+	wrappedStream := &serverStreamWrapper{{ .Name }}{instrumentedStream: is}
+	return h.server.{{ .Name }}(gctx, wrappedStream)
+}
+{{- else }}
+// Bidirectional streaming handler for {{ .Name }}
+func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(stream {{ $.Service }}_{{ .Name }}Server) error {
+	ctx := stream.Context()
+	gctx := h.getGofrContext(ctx, nil)
+	
+	is := &instrumentedStream{
+		ServerStream: stream,
+		ctx:        gctx,
+		method:     "/{{ $.Service }}/{{ .Name }}",
+	}
+	
+	wrappedStream := &bidiStreamWrapper{{ .Name }}{instrumentedStream: is}
+	return h.server.{{ .Name }}(gctx, wrappedStream)
+}
+{{- end }}
+{{- else if .StreamsRequest }}
+// Client-side streaming handler for {{ .Name }}
+func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(stream {{ $.Service }}_{{ .Name }}Server) error {
+	ctx := stream.Context()
+	gctx := h.getGofrContext(ctx, nil)
+	
+	is := &instrumentedStream{
+		ServerStream: stream,
+		ctx:        gctx,
+		method:     "/{{ $.Service }}/{{ .Name }}",
+	}
+	
+	wrappedStream := &clientStreamWrapper{{ .Name }}{instrumentedStream: is}
+	return h.server.{{ .Name }}(gctx, wrappedStream)
+}
+{{- else }}
+// Unary method handler for {{ .Name }}
+func (h *{{ $.Service }}ServerWrapper) {{ .Name }}(ctx context.Context, req *{{ .Request }}) (*{{ .Response }}, error) {
+	gctx := h.getGofrContext(ctx, &{{ .Request }}Wrapper{ctx: ctx, {{ .Request }}: req})
+	
+	resp, err := h.server.{{ .Name }}(gctx, req)
+	if err != nil {
+		return nil, err
+	}
+	
+	return resp, nil
+}
+{{- end }}
+{{- end }}
+
+// mustEmbedUnimplemented{{ .Service }}Server ensures implementation
 func (h *{{ .Service }}ServerWrapper) mustEmbedUnimplemented{{ .Service }}Server() {}
 
-// Register{{ .Service }}ServerWithGofr registers the server with the application
+// Register{{ .Service }}ServerWithGofr registers the server
 func Register{{ .Service }}ServerWithGofr(app *gofr.App, srv {{ .Service }}ServerWithGofr) {
 	registerServerWithGofr(app, srv, func(s grpc.ServiceRegistrar, srv any) {
-		wrapper := &{{ .Service }}ServerWrapper{server: srv.({{ .Service }}ServerWithGofr), healthServer: getOrCreateHealthServer()}
+		wrapper := &{{ .Service }}ServerWrapper{
+			server: srv.({{ .Service }}ServerWithGofr),
+			healthServer: getOrCreateHealthServer(),
+		}
+
 		Register{{ .Service }}Server(s, wrapper)
-		wrapper.Server.SetServingStatus("{{ .Service }}", healthpb.HealthCheckResponse_SERVING)
+
+		wrapper.Server.SetServingStatus("Hello", healthpb.HealthCheckResponse_SERVING)
 	})
 }
 
-// getGofrContext extracts the GoFr context from the original context
+// getGofrContext creates GoFr context
 func (h *{{ .Service }}ServerWrapper) getGofrContext(ctx context.Context, req gofr.Request) *gofr.Context {
 	return &gofr.Context{
 		Context:   ctx,
@@ -190,25 +370,22 @@ type {{ $.Service }}GoFrServer struct {
 }
 
 {{- range .Methods }}
-    {{- if .StreamsRequest }}
-    // Client-side or bidirectional streaming
-    func (s *{{ $.Service }}GoFrServer) {{ .Name }}(ctx *gofr.Context, stream {{ $.Service }}_{{ .Name }}Server) error {
-        // Implementation here
-        return nil
-    }
-    {{- else if .StreamsResponse }}
-    // Server-side streaming
-    func (s *{{ $.Service }}GoFrServer) {{ .Name }}(ctx *gofr.Context, stream {{ $.Service }}_{{ .Name }}Server) error {
-        // Implementation here
-        return nil
-    }
-    {{- else }}
-    // Unary method
-    func (s *{{ $.Service }}GoFrServer) {{ .Name }}(ctx *gofr.Context) (any, error) {
-        return &{{ .Response }}{}, nil
-    }
-    {{- end }}
-    {{- end }}
+{{- if .StreamsRequest }}
+func (s *{{ $.Service }}GoFrServer) {{ .Name }}(ctx *gofr.Context, stream {{ $.Service }}_{{ .Name }}Server) error {
+	// Implementation here
+	return nil
+}
+{{- else if .StreamsResponse }}
+func (s *{{ $.Service }}GoFrServer) {{ .Name }}(ctx *gofr.Context, stream {{ $.Service }}_{{ .Name }}Server) error {
+	// Implementation here
+	return nil
+}
+{{- else }}
+func (s *{{ $.Service }}GoFrServer) {{ .Name }}(ctx *gofr.Context) (any, error) {
+	return &{{ .Response }}{}, nil
+}
+{{- end }}
+{{- end }}
 `
 	clientTemplate = `// Code generated by gofr.dev/cli/gofr. DO NOT EDIT.
 // versions:
@@ -316,6 +493,7 @@ func registerServerWithGofr(app *gofr.App, srv any, registerFunc func(grpc.Servi
 	if !healthServerRegistered {
 		gRPCBuckets := []float64{0.005, 0.01, .05, .075, .1, .125, .15, .2, .3, .5, .75, 1, 2, 3, 4, 5, 7.5, 10}
 		app.Metrics().NewHistogram("app_gRPC-Server_stats", "Response time of gRPC server in milliseconds.", gRPCBuckets...)
+		app.Metrics().NewHistogram("app_gRPC-Stream_stats", "Duration of gRPC stream in milliseconds.", gRPCBuckets...)
 
 		healthpb.RegisterHealthServer(s, h.Server)
 		h.Server.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
