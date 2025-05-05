@@ -473,7 +473,8 @@ func New{{ .Service }}GoFrClient(host string, metrics metrics.Manager, dialOptio
 
 {{ range .Methods }}
 {{- if and .StreamsResponse (not .StreamsRequest) }}
-func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, opts ...grpc.CallOption) (grpc.ServerStreamingClient[{{ .Response }}], error) {
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, 
+	opts ...grpc.CallOption) (grpc.ServerStreamingClient[{{ .Response }}], error) {
 	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
 		return h.client.{{ .Name }}(ctx.Context, req, opts...)
 	}, "app_gRPC-Stream_stats")
@@ -484,7 +485,8 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .R
 	return result.(grpc.ServerStreamingClient[{{ .Response }}]), nil
 }
 {{- else if and .StreamsRequest (not .StreamsResponse) }}
-func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}], error) {
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, 
+	opts ...grpc.CallOption) (grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}], error) {
 	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
 		return h.client.{{ .Name }}(ctx.Context, opts...)
 	}, "app_gRPC-Stream_stats")
@@ -495,7 +497,8 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, opts ...gr
 	return result.(grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}]), nil
 }
 {{- else if and .StreamsRequest .StreamsResponse }}
-func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}], error) {
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, 
+	opts ...grpc.CallOption) (grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}], error) {
 	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
 		return h.client.{{ .Name }}(ctx.Context, opts...)
 	}, "app_gRPC-Stream_stats")
@@ -506,7 +509,8 @@ func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, opts ...gr
 	return result.(grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}]), nil
 }
 {{- else }}
-func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, opts ...grpc.CallOption) (*{{ .Response }}, error) {
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, 
+	opts ...grpc.CallOption) (*{{ .Response }}, error) {
 	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
 		return h.client.{{ .Name }}(ctx.Context, req, opts...)
 	}, "app_gRPC-Client_stats")
