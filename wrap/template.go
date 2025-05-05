@@ -59,6 +59,14 @@ type {{ .Service }}ServerWrapper struct {
 	server    {{ .Service }}ServerWithGofr
 }
 
+{{- $hasStream := false }}
+{{- range .Methods }}
+    {{- if or .StreamsRequest .StreamsResponse }}
+        {{- $hasStream = true }}
+    {{- end }}
+{{- end }}
+
+{{- if $hasStream }}
 // Base instrumented stream
 type instrumentedStream struct {
 	grpc.ServerStream
@@ -97,6 +105,8 @@ func (s *instrumentedStream) RecvMsg(m interface{}) error {
 
 	return err
 }
+{{- end }}
+
 {{ range .Methods }}
 {{- if .StreamsRequest }}
 // Client-side streaming specific wrapper
@@ -421,7 +431,15 @@ import (
 
 type {{ .Service }}GoFrClient interface {
 {{- range .Methods }}
-	{{ .Name }}(*gofr.Context, *{{ .Request }}, ...grpc.CallOption) (*{{ .Response }}, error)
+{{- if and .StreamsResponse (not .StreamsRequest) }}
+	{{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, opts ...grpc.CallOption) (grpc.ServerStreamingClient[{{ .Response }}], error)
+{{- else if and .StreamsRequest (not .StreamsResponse) }}
+	{{ .Name }}(ctx *gofr.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}], error)
+{{- else if and .StreamsRequest .StreamsResponse }}
+	{{ .Name }}(ctx *gofr.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}], error)
+{{- else }}
+	{{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, opts ...grpc.CallOption) (*{{ .Response }}, error)
+{{- end }}
 {{- end }}
 	HealthClient
 }
@@ -436,7 +454,7 @@ func New{{ .Service }}GoFrClient(host string, metrics metrics.Manager, dialOptio
 	if err != nil {
 		return &{{ .Service }}ClientWrapper{
 			client:       nil,
-			HealthClient: &HealthClientWrapper{client: nil}, // Ensure HealthClient is also implemented
+			HealthClient: &HealthClientWrapper{client: nil},
 		}, err
 	}
 
@@ -453,18 +471,52 @@ func New{{ .Service }}GoFrClient(host string, metrics metrics.Manager, dialOptio
 	}, nil
 }
 
-{{- range .Methods }}
-func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, 
-opts ...grpc.CallOption) (*{{ .Response }}, error) {
+{{ range .Methods }}
+{{- if and .StreamsResponse (not .StreamsRequest) }}
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, opts ...grpc.CallOption) (grpc.ServerStreamingClient[{{ .Response }}], error) {
 	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
 		return h.client.{{ .Name }}(ctx.Context, req, opts...)
-	})
+	}, "app_gRPC-Stream_stats")
+
+	if err != nil {
+		return nil, err
+	}
+	return result.(grpc.ServerStreamingClient[{{ .Response }}]), nil
+}
+{{- else if and .StreamsRequest (not .StreamsResponse) }}
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}], error) {
+	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
+		return h.client.{{ .Name }}(ctx.Context, opts...)
+	}, "app_gRPC-Stream_stats")
+
+	if err != nil {
+		return nil, err
+	}
+	return result.(grpc.ClientStreamingClient[{{ .Request }}, {{ .Response }}]), nil
+}
+{{- else if and .StreamsRequest .StreamsResponse }}
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}], error) {
+	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
+		return h.client.{{ .Name }}(ctx.Context, opts...)
+	}, "app_gRPC-Stream_stats")
+
+	if err != nil {
+		return nil, err
+	}
+	return result.(grpc.BidiStreamingClient[{{ .Request }}, {{ .Response }}]), nil
+}
+{{- else }}
+func (h *{{ $.Service }}ClientWrapper) {{ .Name }}(ctx *gofr.Context, req *{{ .Request }}, opts ...grpc.CallOption) (*{{ .Response }}, error) {
+	result, err := invokeRPC(ctx, "/{{ $.Service }}/{{ .Name }}", func() (interface{}, error) {
+		return h.client.{{ .Name }}(ctx.Context, req, opts...)
+	}, "app_gRPC-Client_stats")
 
 	if err != nil {
 		return nil, err
 	}
 	return result.(*{{ .Response }}), nil
 }
+{{- end }}
 {{- end }}
 `
 
@@ -639,7 +691,7 @@ func createGRPCConn(host string, serviceName string, dialOptions ...grpc.DialOpt
 	return conn, nil
 }
 
-func invokeRPC(ctx *gofr.Context, rpcName string, rpcFunc func() (interface{}, error)) (interface{}, error) {
+func invokeRPC(ctx *gofr.Context, rpcName string, rpcFunc func() (interface{}, error), metricName string) (interface{}, error) {
 	span := ctx.Trace("gRPC-srv-call: " + rpcName)
 	defer span.End()
 
@@ -652,8 +704,7 @@ func invokeRPC(ctx *gofr.Context, rpcName string, rpcFunc func() (interface{}, e
 
 	res, err := rpcFunc()
 	logger := gofrgRPC.NewgRPCLogger()
-	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), transactionStartTime, err,
-	rpcName, "app_gRPC-Client_stats")
+	logger.DocumentRPCLog(ctx.Context, ctx.Logger, ctx.Metrics(), transactionStartTime, err, rpcName, metricName)
 
 	return res, err
 }
@@ -662,7 +713,7 @@ func (h *HealthClientWrapper) Check(ctx *gofr.Context, in *grpc_health_v1.Health
 	opts ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
 	result, err := invokeRPC(ctx, fmt.Sprintf("/grpc.health.v1.Health/Check	Service: %q", in.Service), func() (interface{}, error) {
 		return h.client.Check(ctx, in, opts...)
-	})
+	}, "app_gRPC-Client_stats")
 
 	if err != nil {
 		return nil, err
@@ -674,7 +725,7 @@ func (h *HealthClientWrapper) Watch(ctx *gofr.Context, in *grpc_health_v1.Health
 	opts ...grpc.CallOption) (grpc.ServerStreamingClient[grpc_health_v1.HealthCheckResponse], error) {
 	result, err := invokeRPC(ctx, fmt.Sprintf("/grpc.health.v1.Health/Watch	Service: %q", in.Service), func() (interface{}, error) {
 		return h.client.Watch(ctx, in, opts...)
-	})
+	}, "app_gRPC-Stream_stats")
 
 	if err != nil {
 		return nil, err
