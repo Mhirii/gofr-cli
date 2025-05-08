@@ -32,10 +32,11 @@ var (
 
 // ServiceMethod represents a method in a proto service.
 type ServiceMethod struct {
-	Name      string
-	Request   string
-	Response  string
-	Streaming bool
+	Name            string
+	Request         string
+	Response        string
+	StreamsRequest  bool
+	StreamsResponse bool
 }
 
 // ProtoService represents a service in a proto file.
@@ -199,9 +200,7 @@ func uniqueRequestTypes(ctx *gofr.Context, methods []ServiceMethod) []string {
 	requests := make(map[string]bool)
 
 	for _, method := range methods {
-		if !method.Streaming {
-			requests[method.Request] = true
-		}
+		requests[method.Request] = true // Include all request types
 	}
 
 	ctx.Logger.Debugf("Extracted unique request types for methods: %v", requests)
@@ -221,9 +220,19 @@ func mapKeysToSlice(m map[string]bool) []string {
 
 // executeTemplate executes a template with the provided data.
 func executeTemplate(ctx *gofr.Context, data *WrapperData, tmpl string) string {
+	funcMap := template.FuncMap{
+		"lowerFirst": func(s string) string {
+			if s == "" {
+				return ""
+			}
+			return strings.ToLower(s[:1]) + s[1:]
+		},
+	}
+
+	tmplInstance := template.Must(template.New("template").Funcs(funcMap).Parse(tmpl))
+
 	var buf bytes.Buffer
 
-	tmplInstance := template.Must(template.New("template").Parse(tmpl))
 	if err := tmplInstance.Execute(&buf, data); err != nil {
 		ctx.Logger.Errorf("Template execution failed: %v", err)
 		return ""
@@ -284,10 +293,11 @@ func getServices(ctx *gofr.Context, definition *proto.Proto) []ProtoService {
 			for _, element := range s.Elements {
 				if rpc, ok := element.(*proto.RPC); ok {
 					service.Methods = append(service.Methods, ServiceMethod{
-						Name:      rpc.Name,
-						Request:   rpc.RequestType,
-						Response:  rpc.ReturnsType,
-						Streaming: rpc.StreamsReturns || rpc.StreamsRequest,
+						Name:            rpc.Name,
+						Request:         rpc.RequestType,
+						Response:        rpc.ReturnsType,
+						StreamsRequest:  rpc.StreamsRequest,
+						StreamsResponse: rpc.StreamsReturns,
 					})
 				}
 			}
