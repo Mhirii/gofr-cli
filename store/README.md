@@ -1,0 +1,280 @@
+# GoFr Store Generator
+
+A CLI tool that generates GoFr store layer code from YAML configuration files, creating type-safe database access methods with proper context support.
+
+## Quick Start
+
+### Installation
+
+The store generator is included with `gofr-cli`. Ensure you have GoFr CLI installed:
+
+```bash
+go install gofr.dev/cli/gofr@latest
+```
+
+### Your First Store
+
+1. **Initialize a store configuration:**
+   ```bash
+   gofr store init
+   ```
+   This creates a `store.yaml` file with example configuration.
+
+2. **Edit `store.yaml`** with your models and queries (see Configuration Reference below).
+
+3. **Generate the store code:**
+   ```bash
+   gofr store generate
+   ```
+
+4. **Use in your application:**
+   ```go
+   import "your-project/stores/user"
+   
+   userStore := user.NewUser()
+   result, err := userStore.GetUserByID(ctx, 123)
+   ```
+
+## Basic Usage
+
+### Commands
+
+```bash
+# Initialize a new store.yaml configuration file
+gofr store init
+
+# Generate store code from store.yaml
+gofr store generate
+```
+
+### Project Structure
+
+After generation, your project will have:
+
+```
+stores/
+├── all.go              # Store registry (auto-generated)
+├── user/
+│   ├── interface.go    # UserStore interface
+│   ├── store.go         # UserStore implementation
+│   └── user.go          # User model (if generated)
+```
+
+### Using Generated Stores
+
+**Option 1: Direct initialization**
+```go
+import "your-project/stores/user"
+
+userStore := user.NewUser()
+result, err := userStore.GetUserByID(ctx, id)
+```
+
+**Option 2: Using the registry**
+```go
+import "your-project/stores"
+
+allStores := stores.All()
+userStore := stores.GetStore("user").(user.User)
+result, err := userStore.GetUserByID(ctx, id)
+```
+
+### Integration Example
+
+```go
+package main
+
+import (
+    "gofr.dev/pkg/gofr"
+    "your-project/stores/user"
+)
+
+func main() {
+    app := gofr.New()
+    userStore := user.NewUser()
+
+    app.GET("/users/{id}", func(ctx *gofr.Context) (interface{}, error) {
+        id, _ := strconv.ParseInt(ctx.PathParam("id"), 10, 64)
+        return userStore.GetUserByID(ctx, id)
+    })
+
+    app.Run()
+}
+```
+
+## Configuration Reference
+
+### Basic YAML Structure
+
+```yaml
+version: "1.0"
+
+stores:
+  - name: "user"
+    package: "user"
+    output_dir: "stores/user"
+    interface: "User"
+    implementation: "userStore"
+    queries:
+      - name: "GetUserByID"
+        sql: "SELECT id, name, email FROM users WHERE id = ?"
+        type: "select"
+        model: "User"
+        returns: "single"
+        params:
+          - name: "id"
+            type: "int64"
+
+models:
+  - name: "User"
+    fields:
+      - name: "ID"
+        type: "int64"
+        tag: 'db:"id" json:"id"'
+      - name: "Name"
+        type: "string"
+        tag: 'db:"name" json:"name"'
+      - name: "Email"
+        type: "string"
+        tag: 'db:"email" json:"email"'
+```
+
+### Store Configuration
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `name` | Store identifier (used in registry) | Yes |
+| `package` | Go package name | Yes |
+| `output_dir` | Directory for generated files | Yes |
+| `interface` | Interface name (e.g., "User") | Yes |
+| `implementation` | Implementation struct name | Yes |
+| `queries` | Array of database queries | Yes |
+
+### Models
+
+**Generate a new model:**
+```yaml
+models:
+  - name: "User"
+    fields:
+      - name: "ID"
+        type: "int64"
+        tag: 'db:"id" json:"id"'
+      - name: "Name"
+        type: "string"
+        tag: 'db:"name" json:"name"'
+      - name: "CreatedAt"
+        type: "time.Time"
+        tag: 'db:"created_at" json:"created_at"'
+```
+
+**Reference an existing model:**
+```yaml
+models:
+  - name: "User"
+    path: "../models/user.go"
+    package: "your-project/models"
+```
+
+### Queries
+
+**Query Types:**
+- `select` - SELECT queries
+- `insert` - INSERT queries
+- `update` - UPDATE queries
+- `delete` - DELETE queries
+
+**Return Types:**
+- `single` - Returns a single model instance
+- `multiple` - Returns a slice of models
+- `count` - Returns `int64` count
+- `custom` - Returns `interface{}`
+
+**Example Query:**
+```yaml
+queries:
+  - name: "GetUserByID"
+    sql: "SELECT id, name, email FROM users WHERE id = ?"
+    type: "select"
+    model: "User"
+    returns: "single"
+    params:
+      - name: "id"
+        type: "int64"
+    description: "Retrieves a user by ID"
+```
+
+### Multiple Stores
+
+```yaml
+version: "1.0"
+
+stores:
+  - name: "user"
+    package: "user"
+    output_dir: "stores/user"
+    interface: "User"
+    implementation: "userStore"
+    queries: [...]
+
+  - name: "product"
+    package: "product"
+    output_dir: "stores/product"
+    interface: "Product"
+    implementation: "productStore"
+    queries: [...]
+
+models:
+  - name: "User"
+    fields: [...]
+  - name: "Product"
+    fields: [...]
+```
+
+## Generated Code Examples
+
+### Interface
+```go
+// Code generated by gofr.dev/cli/gofr. DO NOT EDIT.
+package user
+
+import "gofr.dev/pkg/gofr"
+
+type User interface {
+    GetUserByID(ctx *gofr.Context, id int64) (User, error)
+    GetAllUsers(ctx *gofr.Context) ([]User, error)
+}
+```
+
+### Implementation
+```go
+// Code generated by gofr.dev/cli/gofr. DO NOT EDIT.
+package user
+
+type userStore struct{}
+
+func NewUser() User {
+    return &userStore{}
+}
+
+func (s *userStore) GetUserByID(ctx *gofr.Context, id int64) (User, error) {
+    // TODO: Implement query using ctx.SQL()
+    return User{}, nil
+}
+```
+
+### Model
+```go
+// Code generated by gofr.dev/cli/gofr. DO NOT EDIT.
+package user
+
+type User struct {
+    ID        int64     `db:"id" json:"id"`
+    Name      string    `db:"name" json:"name"`
+    CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+func (User) TableName() string {
+    return "user"
+}
+```

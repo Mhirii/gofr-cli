@@ -5,11 +5,16 @@ import (
 
 	"gofr.dev/cli/gofr/bootstrap"
 	"gofr.dev/cli/gofr/migration"
+	"gofr.dev/cli/gofr/store"
 	"gofr.dev/cli/gofr/wrap"
 )
 
 func main() {
 	cli := gofr.NewCMD()
+
+	cli.SubCommand("store init", store.InitStore)
+
+	cli.SubCommand("store generate", store.GenerateStore)
 
 	cli.SubCommand("init", bootstrap.Create)
 
